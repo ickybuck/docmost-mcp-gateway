@@ -1,87 +1,86 @@
 # docmost-mcp-gateway
 
-Packages [`@wisflux/docmost-local-mcp`](https://www.npmjs.com/package/@wisflux/docmost-local-mcp) v0.9.2
-behind [supergateway](https://github.com/supercorp-ai/supergateway), exposing the stdio MCP server
-over streamable HTTP so other clients can reach Docmost over the network.
+Packages the **headless** build of [`@wisflux/docmost-local-mcp`](https://github.com/wisflux/docmost-local-mcp)
+v0.9.2 behind [supergateway](https://github.com/supercorp-ai/supergateway), exposing the stdio MCP
+server over streamable HTTP.
 
-Image: `ghcr.io/ickybuck/docmost-mcp-gateway:latest`
+Image: `ghcr.io/ickybuck/docmost-mcp-gateway:latest` (~387MB)
 
 ## Endpoint
 
 Port `8000`, streamable HTTP at **`/mcp`** (supergateway's default path).
 
-Verified working headless: `initialize` and `tools/list` both respond (server reports
-`rmcp 0.6.4`, 20 tools).
+Verified: `initialize` and `tools/list` respond with all 20 tools (server reports `rmcp 0.6.4`).
 
-## Base image constraints
+## Why not `npm install`
 
-The base image is **not** arbitrary. `@wisflux/docmost-local-mcp` is not a pure Node package —
-its postinstall downloads a Rust/Tauri binary (`docmost-local-mcp-linux-x64`, one artifact per
-platform, no headless variant) that is dynamically linked against `libwebkit2gtk-4.1`,
-`libgtk-3`, `libsoup-3` and needs `GLIBC_2.39`.
+`npm install -g @wisflux/docmost-local-mcp` is the wrong way to build this image. Its
+`postinstall.js` maps every Linux target to a single asset, `docmost-local-mcp-linux-x64` —
+a Tauri build **hard-linked** against `libwebkit2gtk-4.1`, `libgtk-3` and `libsoup-3`. That:
+
+- drags in 220 packages / 544MB of desktop stack just to satisfy the dynamic loader, and
+- still cannot authenticate headlessly — it spawns a GTK sign-in window which exits
+  immediately with `The Docmost sign-in window exited unexpectedly (code 101).`
+
+The same v0.9.2 release also publishes **`docmost-local-mcp-linux-x64-headless`**, whose only
+`NEEDED` libs are `libc`, `libm`, `libgcc_s`. It `dlopen`s the GUI toolkit lazily and falls back
+to a local HTTP login server. This image downloads that asset directly, pinned by SHA256.
+
+Both builds require `GLIBC_2.39`, so the base must be trixie (2.41) or newer:
 
 | Base | Outcome |
 | --- | --- |
-| `supercorp/supergateway:latest` | ❌ Alpine 3.22 (musl) — binary cannot exec; musl reports it as a misleading `spawnSync ENOENT` |
-| `node:20-slim` | ❌ Debian bookworm, glibc 2.36 — `GLIBC_2.39 not found` |
-| `ubuntu:24.04` + WebKitGTK | ✅ glibc 2.39 and the required GTK stack |
+| `supercorp/supergateway:latest` | ❌ Alpine 3.22 (musl) — cannot exec; musl reports it as a misleading `spawnSync ENOENT` |
+| `node:20-slim` / TrueNAS host | ❌ Debian bookworm, glibc 2.36 — `GLIBC_2.39 not found` |
+| `node:22-trixie-slim` | ✅ glibc 2.41 |
 
 ## Authentication
 
-This container **cannot perform an interactive login.** A tool call without a session returns:
+Session state lives in `$HOME/.config/docmost-local-mcp/` — `config.json`, `session.json`,
+`credentials.enc.json`, and `credentials.key`. The key sits beside the encrypted file, so the
+directory is portable between hosts. `HOME` is `/data` here, so mount a persistent volume there.
 
-```
-The Docmost sign-in window exited unexpectedly (code 101).
-```
+`DOCMOST_DISABLE_KEYRING=1` is set because a container has no OS keychain.
 
-The binary spawns a GTK sign-in window; with no display it exits immediately, and no
-fallback login server is left listening. Its only env vars are `DOCMOST_BASE_URL`,
-`DOCMOST_DISABLE_KEYRING`, and `DOCMOST_MCP` — there is no email/password env var and no
-headless auth flag.
+### Option A — copy an existing session
 
-### Supply a session instead
-
-Session state lives in `$HOME/.config/docmost-local-mcp/`:
-
-- `config.json`
-- `session.json`
-- `credentials.enc.json`
-- `credentials.key` ← the decryption key sits beside the encrypted file, so the directory is
-  portable between hosts (not machine-bound)
-
-`HOME` is `/data` in this image, so the store belongs at
+If another deployment is already authenticated against the same Docmost instance, copy its
+store into the volume mounted at `/data`, so the files land at
 `/data/.config/docmost-local-mcp/`.
 
-On the TrueNAS box, Hermes already keeps an authenticated store at
-`/opt/data/mcp/docmost/home` (same binary version, same `http://docmost:3000`). Seed this
-container from a **copy** of it:
+> Copy rather than sharing a live directory — two processes rotating the same JWT can clobber
+> each other.
+
+### Option B — log in through the callback bridge
+
+On the first unauthenticated tool call the binary starts a login server on a **dynamic port bound
+to `127.0.0.1`** inside the container, and serves a Docmost sign-in form at `/login`. The tool
+call itself returns `Failed to open fallback browser window` (there is no browser in the
+container), but **the login server stays listening**, so the flow still completes:
 
 ```bash
-cp -a /opt/data/mcp/docmost/home/.config/docmost-local-mcp \
-      /mnt/<pool>/docmost-mcp-gateway/.config/
+# 1. trigger it (this call returns an error - that is expected)
+curl -s -X POST http://localhost:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_spaces","arguments":{}}}'
+
+# 2. find the dynamic port
+docker exec <container> ss -ltn | grep -v :8000
+
+# 3. bridge it somewhere your browser can reach, then sign in at /login
+# 4. re-issue the call from step 1 - it should now succeed
 ```
 
-Then mount that directory as `/data`.
-
-> Copy rather than bind-mounting Hermes's live directory — two processes refreshing the same
-> JWT in one session store can clobber each other.
-
-`DOCMOST_DISABLE_KEYRING=1` is set because there is no OS keychain in a container; without it
-the credential store has nowhere to go.
-
-### When the session expires
-
-Docmost sessions expire and the copied one will too. Re-authenticate via the existing runbook
-(*3.6 → Reauthenticate Docmost MCP (Hermes)*: SSH tunnel + file-driven bridge, with
-`login-url.txt` as the only authoritative source for the dynamic callback port), then re-copy
-the refreshed store.
+Because the server binds `127.0.0.1`, publishing a port is not enough; you need a bridge inside
+the container's network namespace. The port is newly assigned each time — never hard-code it.
 
 ## Configuration
 
 | Var | Default | Notes |
 | --- | --- | --- |
 | `DOCMOST_BASE_URL` | `http://docmost:3000` | Docmost instance to talk to |
-| `DOCMOST_DISABLE_KEYRING` | `1` | No OS keychain in a container; persist to `$HOME` |
+| `DOCMOST_DISABLE_KEYRING` | `1` | No OS keychain in a container |
 | `HOME` | `/data` | Session store parent |
 
 ## Run
@@ -89,7 +88,15 @@ the refreshed store.
 ```bash
 docker run -d --name docmost-mcp \
   -p 8000:8000 \
-  -v /path/to/seeded/home:/data \
+  -v docmost-mcp-data:/data \
   -e DOCMOST_BASE_URL=http://docmost:3000 \
   ghcr.io/ickybuck/docmost-mcp-gateway:latest
 ```
+
+## Build
+
+```bash
+docker build -t docmost-mcp-gateway .
+```
+
+`MCP_VERSION` and `MCP_SHA256` are build args; bump both together when upgrading.

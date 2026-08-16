@@ -1,28 +1,42 @@
-# Base must be glibc >= 2.39 AND carry the GTK3/WebKitGTK stack.
+# Uses the *headless* release asset, not the one `npm install` fetches.
 #
-# @wisflux/docmost-local-mcp is not a pure Node package: its postinstall
-# downloads a Rust/Tauri binary that is dynamically linked against
-# libwebkit2gtk-4.1, libgtk-3, libsoup-3 and requires GLIBC_2.39.
+# @wisflux/docmost-local-mcp's postinstall only knows about
+# docmost-local-mcp-linux-x64 — a Tauri build hard-linked against
+# libwebkit2gtk-4.1/libgtk-3/libsoup-3, which drags in a 544MB desktop stack and
+# still cannot authenticate headlessly (it spawns a GTK sign-in window that exits
+# with code 101 when there is no display).
 #
-#   - supercorp/supergateway:latest is Alpine 3.22 (musl) -> the binary cannot
-#     exec at all; musl reports it as a misleading spawnSync ENOENT.
-#   - node:20-slim is Debian bookworm (glibc 2.36) -> GLIBC_2.39 not found.
+# The same v0.9.2 release also ships docmost-local-mcp-linux-x64-headless, whose
+# only NEEDED libs are libc/libm/libgcc_s. It dlopens the GUI toolkit lazily and
+# falls back to a local login callback server, which is what makes the
+# login-url.txt reauthentication flow possible.
 #
-# Ubuntu 24.04 provides glibc 2.39 and the WebKitGTK 4.1 packages.
-FROM ubuntu:24.04
+# Both builds still require GLIBC_2.39, so the base must be trixie (2.41) or
+# newer -- bookworm (2.36) is too old.
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg xz-utils \
-      libwebkit2gtk-4.1-0 libgtk-3-0t64 libsoup-3.0-0 \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+FROM debian:trixie-slim AS fetch
 
-RUN npm install -g @wisflux/docmost-local-mcp@0.9.2 supergateway@latest
+ARG MCP_VERSION=0.9.2
+ARG MCP_SHA256=e71cdcd8239ab1e4e33de55968d4460ce795711294d4a753132832fa8e9f7ad2
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /tmp/docmost-local-mcp \
+         "https://github.com/wisflux/docmost-local-mcp/releases/download/v${MCP_VERSION}/docmost-local-mcp-linux-x64-headless" \
+    && echo "${MCP_SHA256}  /tmp/docmost-local-mcp" | sha256sum -c - \
+    && chmod 0755 /tmp/docmost-local-mcp
+
+
+FROM node:22-trixie-slim
+
+RUN npm install -g supergateway@latest && npm cache clean --force
+
+COPY --from=fetch /tmp/docmost-local-mcp /usr/local/bin/docmost-local-mcp
 
 ENV HOME=/data
 ENV DOCMOST_BASE_URL=http://docmost:3000
-# No OS keychain in a container; persist the session to $HOME (/data) instead.
+# No OS keychain in a container; persist credentials under $HOME instead.
 ENV DOCMOST_DISABLE_KEYRING=1
 
 WORKDIR /data
