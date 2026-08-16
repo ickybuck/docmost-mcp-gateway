@@ -36,17 +36,39 @@ Both builds require `GLIBC_2.39`, so the base must be trixie (2.41) or newer:
 
 ## Authentication
 
-Session state lives in `$HOME/.config/docmost-local-mcp/` — `config.json`, `session.json`,
-`credentials.enc.json`, and `credentials.key`. The key sits beside the encrypted file, so the
-directory is portable between hosts. `HOME` is `/data` here, so mount a persistent volume there.
+Session state lives in **`$HOME/.docmost-local-mcp/`** (a dotdir directly under `$HOME` — *not*
+under `.config/`), holding `config.json`, `session.json`, `credentials.enc.json`, and
+`credentials.key`. The key sits beside the encrypted file, so the directory is portable between
+hosts. `HOME` is `/data` here, so mount a persistent volume there and the store lands at
+`/data/.docmost-local-mcp/`.
 
 `DOCMOST_DISABLE_KEYRING=1` is set because a container has no OS keychain.
 
+### The session is bound to its base URL
+
+`config.json` records the `baseUrl` the login was performed against:
+
+```json
+{
+  "baseUrl": "https://docs.example.com",
+  "email": "you@example.com",
+  "lastAuthenticatedAt": "..."
+}
+```
+
+**`DOCMOST_BASE_URL` at runtime must match the URL the session was created with.** Verified: a
+store authenticated against one URL, then run with a different `DOCMOST_BASE_URL`, does not
+reuse the session — it attempts a fresh login and fails with `Failed to call the Docmost login
+endpoint`. Authenticate against whichever URL the deployed container will actually use.
+
+Verified working: a brand-new container on a previously authenticated volume, with a matching
+`DOCMOST_BASE_URL`, serves `list_spaces` and `get_current_user` without any re-login.
+
 ### Option A — copy an existing session
 
-If another deployment is already authenticated against the same Docmost instance, copy its
-store into the volume mounted at `/data`, so the files land at
-`/data/.config/docmost-local-mcp/`.
+If another deployment is already authenticated against the same Docmost instance *at the same
+base URL*, copy its store into the volume mounted at `/data`, so the files land at
+`/data/.docmost-local-mcp/`.
 
 > Copy rather than sharing a live directory — two processes rotating the same JWT can clobber
 > each other.
@@ -58,22 +80,37 @@ to `127.0.0.1`** inside the container, and serves a Docmost sign-in form at `/lo
 call itself returns `Failed to open fallback browser window` (there is no browser in the
 container), but **the login server stays listening**, so the flow still completes:
 
+Because the server binds `127.0.0.1`, publishing a port is not enough — you need a bridge inside
+the container's own network namespace. Start the container with a spare published port (`9000`
+below) to bridge onto, since the login port is only known later and is newly assigned every
+time. **Never hard-code it.**
+
 ```bash
-# 1. trigger it (this call returns an error - that is expected)
-curl -s -X POST http://localhost:8000/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_spaces","arguments":{}}}'
-
-# 2. find the dynamic port
-docker exec <container> ss -ltn | grep -v :8000
-
-# 3. bridge it somewhere your browser can reach, then sign in at /login
-# 4. re-issue the call from step 1 - it should now succeed
+docker run -d --name docmost-mcp -p 8000:8000 -p 9000:9000 \
+  -v docmost-mcp-data:/data -e DOCMOST_BASE_URL=https://docs.example.com \
+  ghcr.io/ickybuck/docmost-mcp-gateway:latest
 ```
 
-Because the server binds `127.0.0.1`, publishing a port is not enough; you need a bridge inside
-the container's network namespace. The port is newly assigned each time — never hard-code it.
+```bash
+docker exec docmost-mcp sh -c 'apt-get -qq update && apt-get -qq install -y socat iproute2 curl'
+```
+
+Trigger the login server — this call returns `Failed to open fallback browser window`, which is
+expected and harmless; the server it started keeps listening:
+
+```bash
+docker exec -d docmost-mcp curl -s -X POST http://localhost:8000/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_spaces","arguments":{}}}'
+```
+
+Find the dynamic port and bridge it to the published one:
+
+```bash
+docker exec docmost-mcp sh -c "socat TCP-LISTEN:9000,fork,reuseaddr TCP:127.0.0.1:$(docker exec docmost-mcp sh -c "ss -ltn | grep -v ':8000' | grep -v ':9000' | grep -oE '127.0.0.1:[0-9]+'" | cut -d: -f2 | head -1)" &
+```
+
+Open `http://localhost:9000/login`, sign in, then re-issue the call — it now succeeds. The
+sign-in server shuts down on success and the store is written to `/data/.docmost-local-mcp/`.
+Remove the `9000` publish and the socat bridge afterwards; they are only needed for login.
 
 ## Configuration
 
