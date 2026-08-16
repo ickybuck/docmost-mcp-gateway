@@ -1,0 +1,34 @@
+# TrueNAS SCALE Custom App (Apps -> Discover -> Custom App -> Install via YAML).
+#
+# Mirrors the Hermes app's pattern: join the external knowledge-stack network so
+# http://docmost:3000 resolves, and keep the published port bound to loopback.
+#
+# DOCMOST_BASE_URL must be the URL the session is authenticated against. Use the
+# in-network name, not the Tailscale Serve URL -- *.ts.net names resolve only via
+# MagicDNS and are not resolvable from inside a container on this host.
+
+name: docmost-mcp-gateway
+
+services:
+  docmost-mcp-gateway:
+    image: ghcr.io/ickybuck/docmost-mcp-gateway:latest
+    restart: unless-stopped
+    networks:
+      default: {}
+      docmost: {}
+    ports:
+      # Loopback only; cloudflared fronts it. Add a second published port
+      # temporarily when running the login bridge (see README, Option B).
+      - "127.0.0.1:8010:8000"
+    environment:
+      DOCMOST_BASE_URL: http://docmost:3000
+      DOCMOST_DISABLE_KEYRING: "1"
+    volumes:
+      - /mnt/apps-ssd/appdata/docmost-mcp-remote-data:/data
+    cpus: "1.0"
+    mem_limit: 1g
+
+networks:
+  docmost:
+    external: true
+    name: ix-knowledge-stack_default
