@@ -6,21 +6,24 @@
 # same volume: they would share one identity and clobber each other's JWT.
 #
 # Everything below that differs from the first instance is marked CHANGED.
-# The network alias in particular MUST be unique -- both containers sit on
-# ix-cloudflared-tunnel_default, and a duplicate alias would make the tunnel
-# origin ambiguous and route requests to whichever container answers first.
+#
+# CRITICAL: the SERVICE KEY must differ from the first instance, not just the
+# `aliases:` list. Compose attaches the service name as a network alias
+# automatically, in addition to anything under `aliases:`. Two apps that both
+# use the service key `docmost-mcp-gateway` therefore both answer to that name
+# on ix-cloudflared-tunnel_default, and the tunnel origin round-robins between
+# them -- sending roughly half of one user's traffic to the other user's
+# container, which has a different (or no) Docmost session.
 
 name: docmost-remote-mcp-marilyn            # CHANGED
 
 services:
-  docmost-mcp-gateway:
+  docmost-mcp-gateway-marilyn:              # CHANGED - service key must be unique
     image: ghcr.io/ickybuck/docmost-mcp-gateway:latest
     restart: unless-stopped
     networks:
       docmost: {}
-      tunnel:
-        aliases:
-          - docmost-mcp-gateway-marilyn     # CHANGED - must be unique
+      tunnel: {}
     environment:
       DOCMOST_BASE_URL: http://docmost:3000
       DOCMOST_DISABLE_KEYRING: "1"
