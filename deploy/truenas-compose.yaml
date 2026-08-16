@@ -1,11 +1,16 @@
 # TrueNAS SCALE Custom App (Apps -> Discover -> Custom App -> Install via YAML).
 #
-# Mirrors the Hermes app's pattern: join the external knowledge-stack network so
-# http://docmost:3000 resolves, and keep the published port bound to loopback.
+# Deliberately publishes NO host port. The MCP endpoint has no authentication of
+# its own, so exposing it on 0.0.0.0 would make the whole wiki readable and
+# writable by anything on the LAN, bypassing the Cloudflare Access OAuth in front
+# of it. Instead the container joins two existing external networks:
 #
-# DOCMOST_BASE_URL must be the URL the session is authenticated against. Use the
-# in-network name, not the Tailscale Serve URL -- *.ts.net names resolve only via
-# MagicDNS and are not resolvable from inside a container on this host.
+#   ix-cloudflared-tunnel_default  -> cloudflared reaches http://docmost-mcp-gateway:8000
+#   ix-knowledge-stack_default     -> resolves http://docmost:3000
+#
+# DOCMOST_BASE_URL must match the URL the session was authenticated against. Use
+# the in-network name: *.ts.net Tailscale Serve names resolve only via MagicDNS
+# and are not resolvable from inside a container on this host.
 
 name: docmost-mcp-gateway
 
@@ -14,12 +19,10 @@ services:
     image: ghcr.io/ickybuck/docmost-mcp-gateway:latest
     restart: unless-stopped
     networks:
-      default: {}
       docmost: {}
-    ports:
-      # Loopback only; cloudflared fronts it. Add a second published port
-      # temporarily when running the login bridge (see README, Option B).
-      - "127.0.0.1:8010:8000"
+      tunnel:
+        aliases:
+          - docmost-mcp-gateway
     environment:
       DOCMOST_BASE_URL: http://docmost:3000
       DOCMOST_DISABLE_KEYRING: "1"
@@ -32,3 +35,6 @@ networks:
   docmost:
     external: true
     name: ix-knowledge-stack_default
+  tunnel:
+    external: true
+    name: ix-cloudflared-tunnel_default
