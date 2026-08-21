@@ -6,6 +6,22 @@ server over streamable HTTP.
 
 Image: `ghcr.io/ickybuck/docmost-mcp-gateway:latest` (~387MB)
 
+## Scope
+
+General-purpose. This gateway is not tied to any particular content migration — deploy an
+instance wherever an agent needs authenticated Docmost access over HTTP, and run as many as
+you have Docmost identities for.
+
+**Know the write limit before choosing what to point it at.** Docmost stores page bodies as
+ProseMirror JSON, and its REST `/pages/update` handles metadata only — content changes route
+through the Yjs/Hocuspocus collaboration gateway. There is no block-level or append endpoint,
+so every content write replaces the **entire** document.
+
+Cost therefore scales with page size, not edit size: a one-line change to a 10,000-word page
+makes the agent re-emit all ~13,000 tokens. Keep agent-written pages small, or split them into
+child pages (`create_page` with `parent_page_id`, `list_child_pages` to navigate). This is an
+API-shape constraint, not a tuning problem — server-side writes are milliseconds.
+
 ## Endpoint
 
 Port `8000`, streamable HTTP at **`/mcp`** (supergateway's default path).

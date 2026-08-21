@@ -1,4 +1,8 @@
-# Second gateway instance, for a different Docmost user.
+# Additional gateway instance, for a different Docmost user.
+#
+# General-purpose: one instance per Docmost identity, for whatever an agent needs
+# authenticated Docmost access for. Marilyn below is just a worked example -
+# substitute your own name throughout.
 #
 # One container == one Docmost identity. The session store is per-instance, so a
 # second user needs their own app, their own volume, their own public hostname
